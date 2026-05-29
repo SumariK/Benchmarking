@@ -45,29 +45,34 @@ set.seed(42)
 ## Sorts intervals by start and merges any that overlap or are
 ## adjacent. Returns a data.table with columns start and end.
 merge_intervals <- function(starts, ends) {
+  if (length(starts) == 0) return(data.table(start = integer(0), end = integer(0)))
+  
   ord    <- order(starts)
   starts <- starts[ord]
   ends   <- ends[ord]
-
+  
+  cur_s <- starts[1]
+  cur_e <- ends[1]
+  
   m_starts <- c()
   m_ends   <- c()
-  cur_s    <- starts[1]
-  cur_e    <- ends[1]
-
-  for (i in seq(2, length(starts))) {
-    if (starts[i] <= cur_e) {
-      cur_e <- max(cur_e, ends[i])
-    } else {
-      m_starts <- c(m_starts, cur_s)
-      m_ends   <- c(m_ends,   cur_e)
-      cur_s    <- starts[i]
-      cur_e    <- ends[i]
+  
+  if (length(starts) >= 2) {
+    for (i in seq(2, length(starts))) {
+      if (starts[i] <= cur_e) {
+        cur_e <- max(cur_e, ends[i])
+      } else {
+        m_starts <- c(m_starts, cur_s)
+        m_ends   <- c(m_ends,   cur_e)
+        cur_s    <- starts[i]
+        cur_e    <- ends[i]
+      }
     }
   }
-
+  
   m_starts <- c(m_starts, cur_s)
   m_ends   <- c(m_ends,   cur_e)
-
+  
   data.table(start = m_starts, end = m_ends)
 }
 
@@ -77,7 +82,7 @@ merge_intervals <- function(starts, ends) {
 get_unmasked_residues <- function(sequence, starts, ends) {
   prot_len  <- nchar(sequence)
   intervals <- merge_intervals(starts, ends)
-
+  
   ## Build a logical mask: TRUE = unmasked position
   mask <- rep(TRUE, prot_len)
   for (i in seq_len(nrow(intervals))) {
@@ -85,7 +90,7 @@ get_unmasked_residues <- function(sequence, starts, ends) {
     e <- min(prot_len, intervals$end[i])
     mask[s:e] <- FALSE
   }
-
+  
   aa <- strsplit(sequence, "")[[1]]
   paste0(aa[mask], collapse = "")
 }
@@ -110,14 +115,16 @@ cat("Loading annotated IEDB data...\n")
 df <- fread(FULL_CSV)
 
 ## ============================================================
-## SECTION 1: Load annotated IEDB data
+## SECTION 2: Subset to DQ positives
 ## ============================================================
-## Reads the full annotated IEDB CSV from the upstream pipeline.
-## Must include sequence, position, locus, and label columns.
+## Filters to locus == "DQ" and label == 1.
+## Reports record count and unique source protein count.
 ## ============================================================
 
-cat("Loading annotated IEDB data...\n")
-df <- fread(FULL_CSV)
+dq_pos <- df[locus == "DQ" & label == 1]
+
+cat("DQ positive records:", nrow(dq_pos), "\n")
+cat("Unique source proteins:", uniqueN(dq_pos$uniprot_id), "\n\n")
 
 ## ============================================================
 ## SECTION 3: Build known DQ positive peptide set
@@ -172,14 +179,14 @@ cat("Building shuffled unmasked residue pools...\n")
 
 prot_seqs[, shuffled_pool := {
   row_map <- binding_map[uniprot_id == .BY$uniprot_id]
-
+  seq1    <- sequence[1]                               ## take one sequence per group
+  
   if (nrow(row_map) == 0) {
-    ## No binding regions recorded — shuffle the full sequence
-    aa <- strsplit(sequence, "")[[1]]
+    aa <- strsplit(seq1, "")[[1]]
     paste0(sample(aa), collapse = "")
   } else {
     unmasked <- get_unmasked_residues(
-      sequence,
+      seq1,
       row_map$starts[[1]],
       row_map$ends[[1]]
     )
@@ -215,32 +222,32 @@ negatives     <- character(0)
 negatives_set <- character(0)
 
 for (i in seq_len(nrow(prot_seqs))) {
-
+  
   uid      <- prot_seqs$uniprot_id[i]
   pool     <- prot_seqs$shuffled_pool[i]
   pool_len <- nchar(pool)
-
+  
   generated <- 0L
   attempts  <- 0L
-
+  
   while (generated < N_PER_PROTEIN && attempts < MAX_ATTEMPTS) {
     attempts <- attempts + 1L
-
+    
     pep_len <- sample(12L:25L, 1L)
     if (pool_len < pep_len) break
-
+    
     s         <- sample(1L:(pool_len - pep_len + 1L), 1L)
     e         <- s + pep_len - 1L
     candidate <- substr(pool, s, e)
-
+    
     if (candidate %in% dq_positives)  next
     if (candidate %in% negatives_set) next
-
+    
     negatives     <- c(negatives, candidate)
     negatives_set <- c(negatives_set, candidate)
     generated     <- generated + 1L
   }
-
+  
   if (generated < N_PER_PROTEIN) {
     cat(sprintf(
       "Warning: Only generated %d/%d negatives for protein %s\n",
