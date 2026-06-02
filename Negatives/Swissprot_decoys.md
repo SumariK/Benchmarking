@@ -109,8 +109,8 @@ BiocManager::install("Biostrings")
 ### 2. Download SwissProt FASTA
 
 ```bash
-wget https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz
-gunzip uniprot_sprot.fasta.gz
+wget -O human_swissprot_reviewed.fasta \
+"https://rest.uniprot.org/uniprotkb/stream?query=proteome:UP000005640%20AND%20reviewed:true&format=fasta"
 ```
 
 ### 3. Update paths in the CONFIG section
