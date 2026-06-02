@@ -1,6 +1,6 @@
-# SwissProt-Derived Negative Peptide Generation
+# DQ-Focused Benchmark Dataset Generation
 
-An R pipeline that generates decoy negative peptides by randomly sampling windows from SwissProt protein sequences, matched to the length distribution of known positive peptides.
+An R pipeline that builds a balanced benchmark dataset of 1000 HLA-DQ positive peptides and 5000 SwissProt-derived decoy negatives, with cross-locus rejection screening across DQ, DP, and DR to prevent any confirmed Class II binder from entering the negative set.
 
 ---
 
@@ -20,59 +20,66 @@ An R pipeline that generates decoy negative peptides by randomly sampling window
 
 ## Overview
 
-This pipeline samples random peptide-length windows from the SwissProt reviewed protein database to serve as decoy negatives for MHC-II binding prediction benchmarking. Negatives are matched to the length distribution of the positive set, filtered to canonical amino acids only, and screened against both the local positive set and all human Class II confirmed binders from the IEDB MHC ligand report before being accepted. The final output is a shuffled, labelled benchmark dataset ready for model evaluation.
+This pipeline builds a DQ-focused benchmark dataset by sampling 1000 positive peptides directly from the annotated IEDB full CSV produced by the upstream processing pipeline, then generating 5000 SwissProt-derived decoy negatives matched to the length distribution of those positives. No separate positives file is needed — both positives and the rejection filter are derived from the same IEDB source.
+
+The key design feature is the **cross-locus rejection screen**: confirmed positives from DQ, DP, and DR are all pooled into a single rejection set. Any SwissProt window matching a confirmed binder at any Class II locus is discarded before being accepted as a negative, regardless of which locus it was originally annotated against.
 
 ---
 
 ## Important Note on Study Design
 
-This pipeline operates under a **positive-unlabelled (PU) learning** assumption. Because SwissProt contains human proteins and MHC-II presents endogenous human peptides, some randomly sampled decoys will inevitably be genuine binders that are simply unlabelled. This has two consequences:
+This pipeline operates under a **positive-unlabelled (PU) learning** assumption. Because SwissProt contains human proteins and MHC-II presents endogenous human peptides, some randomly sampled decoys will inevitably be genuine binders that are simply absent from IEDB. This has two consequences:
 
-- Model performance metrics such as AUC will be **conservatively underestimated** — the model is penalised for correctly predicting unlabelled true binders as positive
+- Model performance metrics such as AUC will be **conservatively underestimated**
 - The problem is made **artificially harder** than it would be with experimentally confirmed non-binders
 
-The IEDB screen integrated into the sampling loop reduces this contamination by rejecting any candidate matching a confirmed human Class II binder in the IEDB MHC ligand report. However, this filter is best-effort — binders that are unpublished, understudied, or restricted to alleles not well represented in IEDB will not be caught. The PU learning caveat therefore still applies and should be noted in any reported results.
+The cross-locus IEDB screen substantially reduces contamination relative to a single-locus filter, but cannot fully resolve the PU learning limitation. This should be noted in any reported results.
 
 ---
 
 ## How It Works
 
 ```
-uniprot_sprot.fasta     positives.txt      mhc_ligand_full.csv
-        │                    │                      │
-        ▼                    ▼                      ▼
- Load protein          Load positive         Load IEDB human
- sequences             peptides              Class II positives
- (plain strings)       (set for fast         Clean + filter to
-                       lookup)               canonical AA only
-        │                    │                      │
-        │                    └──────────────────────┤
-        │                                           ▼
-        │                              Combined rejection set
-        │                          (local positives + IEDB binders)
-        │                          stored as hashed environment
-        │                          for O(1) lookup
-        │                                           │
-        └───────────────────────────────────────────┤
-                                                    ▼
-                                   Build length distribution
-                                   (count positives per length)
-                                                    │
-                                                    ▼
-                                For each length → sample target count:
-                                  └─ Pick random protein
-                                  └─ Pick random start position
-                                  └─ Extract window of target length
-                                  └─ Reject if non-canonical AA present
-                                  └─ Reject if in combined rejection set
-                                  └─ Reject if already in negative set
-                                  └─ Accept → collect
-                                                    │
-                          ┌─────────────────────────┴──────────────────┐
-                          ▼                         ▼                  ▼
-                   negatives.txt              negatives.faa    benchmark_dataset.txt
-                (raw negative list)       (FASTA, indexed    (shuffled + labelled,
-                                          dedup headers)      tab-separated)
+context_iedb_full.csv              uniprot_sprot.fasta
+         │                                  │
+         ▼                                  ▼
+ Load annotated IEDB data         Load SwissProt sequences
+         │                         (plain strings, headers
+         ├──────────────────────────────────┤  discarded)
+         │                                  │
+         ▼                                  │
+ Sample 1000 DQ positives                   │
+ (locus = DQ, label = 1,                    │
+  deduplicated by peptide)                  │
+         │                                  │
+         ▼                                  │
+ Build cross-locus rejection set            │
+ DQ + DP + DR positives combined            │
+ stored as hashed environment               │
+ for O(1) lookup                            │
+         │                                  │
+         ▼                                  │
+ Build length distribution                  │
+ from sampled DQ positives                  │
+ (proportional targets summing              │
+  to N_NEGATIVES)                           │
+         │                                  │
+         └──────────────────────────────────┤
+                                            ▼
+                             For each length → sample target count:
+                               └─ Pick random SwissProt protein
+                               └─ Pick random start position
+                               └─ Extract window of target length
+                               └─ Reject if non-canonical AA
+                               └─ Reject if in cross-locus
+                                  rejection set (DQ + DP + DR)
+                               └─ Reject if already sampled
+                               └─ Accept → collect
+                                            │
+                  ┌─────────────────────────┼──────────────────────┐
+                  ▼                         ▼                      ▼
+   DQ_benchmark_positives.txt  DQ_benchmark_negatives.txt  DQ_benchmark_negatives.faa
+   DQ_benchmark_dataset.txt (shuffled + labelled, tab-separated)
 ```
 
 ---
@@ -95,25 +102,25 @@ BiocManager::install("Biostrings")
 
 ## Setup
 
-### 1. Download SwissProt FASTA
+### 1. Run the upstream processing pipeline
+
+`context_iedb_full.csv` must be generated by the upstream IEDB processing pipeline before running this script. It should contain `locus`, `label`, and `peptide` columns at minimum.
+
+### 2. Download SwissProt FASTA
 
 ```bash
 wget https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz
 gunzip uniprot_sprot.fasta.gz
 ```
 
-### 2. Download IEDB MHC ligand report
-
-Download the full MHC ligand export from [https://www.iedb.org](https://www.iedb.org) and save as `mhc_ligand_full.csv`.
-
 ### 3. Update paths in the CONFIG section
 
-Open `swissprot_negatives.R` and set `SWISSPROT_FASTA`, `POSITIVES_FILE`, and `IEDB_CSV` to your local paths.
+Open `swissprot_negatives_DQ.R` and set `IEDB_FULL_CSV`, `SWISSPROT_FASTA`, and `OUT_DIR` to your local paths.
 
 ### 4. Run
 
 ```bash
-Rscript swissprot_negatives.R
+Rscript swissprot_negatives_DQ.R
 ```
 
 ---
@@ -122,53 +129,52 @@ Rscript swissprot_negatives.R
 
 | File | Description |
 |---|---|
+| `context_iedb_full.csv` | Annotated IEDB table from upstream pipeline — must contain `locus`, `label`, `peptide` columns |
 | `uniprot_sprot.fasta` | SwissProt reviewed protein sequences, downloaded from UniProt FTP |
-| `positives.txt` | One positive peptide per line, no header |
-| `mhc_ligand_full.csv` | Full IEDB MHC ligand export, used to build the IEDB rejection set |
 
 ---
 
 ## Output Files
 
+All outputs are written to `OUT_DIR`.
+
 | File | Description |
 |---|---|
-| `negatives.txt` | Raw decoy negative peptides, one per line, no header |
-| `negatives.faa` | FASTA file with deduplicated indexed headers (`neg_1`, `neg_2`, ...) |
-| `benchmark_dataset.txt` | Shuffled combined dataset with tab-separated labels — `<peptide>\t<label>` where 1 = positive, 0 = negative |
+| `DQ_benchmark_positives.txt` | 1000 sampled DQ positive peptides, one per line |
+| `DQ_benchmark_negatives.txt` | 5000 SwissProt decoy negatives, one per line |
+| `DQ_benchmark_negatives.faa` | FASTA file with deduplicated indexed headers (`neg_1`, `neg_2`, ...) |
+| `DQ_benchmark_dataset.txt` | Shuffled combined dataset — `<peptide>\t<label>` where 1 = positive, 0 = negative |
 
 ---
 
 ## Pipeline Sections
 
-### Section 1 — Load positive peptides
-Reads the positive peptide file, one peptide per line. Whitespace is stripped and blank lines are skipped. Stored as a character vector and deduplicated for use as a rejection lookup.
+### Section 1 — Load annotated IEDB data
+Reads `context_iedb_full.csv` using `data.table::fread`. Prints a count breakdown by locus and label as a sanity check.
 
-### Section 2 — Build length distribution
-Counts how many positives exist at each peptide length using `table()`. This distribution drives the sampling target — for each length, `count × NEGATIVES_PER_POSITIVE` decoys are generated, so the negative set mirrors the length profile of the positive set.
+### Section 2 — Sample DQ positives
+Filters to `locus == "DQ"` and `label == 1`, deduplicates by peptide sequence, then randomly samples `N_POSITIVES` (default 1000). If fewer unique DQ positives are available than requested, all are used and a warning is printed.
 
-### Section 3 — Build IEDB confirmed binder rejection set
-Loads the full IEDB MHC ligand report using `data.table::fread` (skip = 1) and filters to human Class II positives. PTM-modified peptides (containing `+`) and non-canonical sequences are removed. The cleaned set is merged with the local positives into a combined rejection set, which is then stored as a hashed R environment for O(1) lookup during sampling. This filter is best-effort — binders absent from IEDB will not be caught.
+### Section 3 — Build cross-locus rejection set
+Pools all confirmed positives from DQ, DP, and DR into a single rejection set. Prints the per-locus breakdown and combined total so you can verify the coverage. The set is stored as a hashed R environment for O(1) lookup during sampling. This is the key step that distinguishes this pipeline from a single-locus filter — any peptide that is a confirmed binder at any Class II locus is excluded from the negatives.
 
-### Section 4 — Load SwissProt sequences
-Parses the full SwissProt FASTA using `Biostrings::readAAStringSet` and converts sequences to plain character strings. The `AAStringSet` object is removed from memory immediately after conversion to free RAM. Expect ~1–2 GB memory usage while the FASTA is being parsed.
+### Section 4 — Build length distribution
+Counts positives at each peptide length from the sampled DQ set and computes proportional per-length targets that sum exactly to `N_NEGATIVES`. Remainders after flooring are distributed to the lengths with the largest fractional parts, ensuring no rounding error in the total.
 
-### Section 5 — Sample negatives by length
-For each peptide length, randomly selects proteins and start positions using `sample.int` until the target count is reached or `target × MAX_ATTEMPTS_FACTOR` attempts are exhausted. A second hashed environment tracks already-accepted negatives for deduplication. Three rejection criteria are applied in order:
+### Section 5 — Load SwissProt sequences
+Parses the full SwissProt FASTA using `Biostrings::readAAStringSet` and converts to plain character strings. The `AAStringSet` object is removed immediately after conversion to free RAM. Expect ~1–2 GB memory usage during parsing.
 
-- **Non-canonical amino acids** — sequences not matching `^[ACDEFGHIKLMNPQRSTVWY]+$` are discarded.
-- **Combined rejection set** — any candidate found in the local positives + IEDB binder environment is discarded.
-- **Duplicate negatives** — candidates already accepted in the current run are discarded via the negatives environment.
+### Section 6 — Sample negatives from SwissProt
+For each peptide length, randomly samples windows from random SwissProt proteins until the per-length target is reached or `target × MAX_ATTEMPTS_FACTOR` attempts are exhausted. Three rejection criteria are applied in order: non-canonical amino acids, presence in the cross-locus rejection set, and deduplication against already-accepted negatives. Both lookups use hashed environments for O(1) performance.
 
-A warning is printed for any length where the target cannot be reached.
+### Section 7 — Write positives and raw negatives lists
+Writes the sampled positives and accepted negatives to plain text files, one peptide per line, no header.
 
-### Section 6 — Write raw negatives list
-Writes all accepted negatives to a plain text file using `writeLines`, one peptide per line, no header.
+### Section 8 — Write FASTA with deduplicated indexed headers
+Writes negatives to FASTA format with sequential `neg_1`, `neg_2`, ... headers, which are unique by construction. The deduplication counter also handles protein-name-based headers by appending an incrementing suffix on collision.
 
-### Section 7 — Write FASTA with deduplicated indexed headers
-Writes the accepted negatives to a FASTA file. Headers use a sequential base name (`neg_1`, `neg_2`, ...) which is unique by design. The deduplication logic also handles the general case where protein-name-based headers are used — it tracks occurrences of each base name and appends an incrementing suffix (e.g. `Albumin_1`, `Albumin_2`) when a collision is detected. A summary reports how many headers required disambiguation.
-
-### Section 8 — Build and write shuffled benchmark dataset
-Combines positives (label 1) and negatives (label 0) into a `data.table`, shuffles rows using `sample(.N)`, and writes a tab-separated file with no column header using `fwrite`. Shuffling removes any positional ordering bias that could affect model training or evaluation metrics.
+### Section 9 — Build and write shuffled benchmark dataset
+Combines positives (label 1) and negatives (label 0) into a single `data.table`, shuffles rows using `sample(.N)`, and writes a tab-separated file with no column header. Shuffling removes positional ordering bias.
 
 ---
 
@@ -176,13 +182,11 @@ Combines positives (label 1) and negatives (label 0) into a `data.table`, shuffl
 
 | Setting | Default | Notes |
 |---|---|---|
+| `IEDB_FULL_CSV` | See script | Output of upstream IEDB processing pipeline |
 | `SWISSPROT_FASTA` | See script | Path to gunzipped SwissProt FASTA |
-| `POSITIVES_FILE` | See script | One peptide per line, no header |
-| `IEDB_CSV` | See script | Full IEDB MHC ligand export, skip = 1 header row |
-| `NEGATIVES_OUT` | See script | Output path for raw negatives TXT |
-| `NEGATIVES_FAA` | See script | Output path for FASTA file |
-| `BENCHMARK_OUT` | See script | Output path for labelled benchmark dataset |
-| `NEGATIVES_PER_POSITIVE` | 5 | Decoys generated per positive at each length |
+| `OUT_DIR` | See script | Output directory — created automatically if absent |
+| `N_POSITIVES` | 1000 | DQ positives to sample |
+| `N_NEGATIVES` | 5000 | SwissProt decoy negatives to generate |
 | `MAX_ATTEMPTS_FACTOR` | 1000 | Safety ceiling multiplier per length |
-| `RANDOM_SEED` | 42 | Fixed seed passed to `set.seed()` for reproducibility |
-| `CANONICAL_AA` | `^[ACDEFGHIKLMNPQRSTVWY]+$` | Regex for canonical AA filter; modify only if your predictor handles extended alphabets |
+| `RANDOM_SEED` | 42 | Passed to `set.seed()` for reproducibility |
+| `CANONICAL_AA` | `^[ACDEFGHIKLMNPQRSTVWY]+$` | Regex for canonical AA filter |
