@@ -55,7 +55,7 @@ library(Biostrings)
 
 ## ── Config ──────────────────────────────────────────────────
 IEDB_FULL_CSV    <- "/gpfs/home4/skleynhans/report/iedb_data/context_iedb_full.csv"
-SWISSPROT_FASTA  <- "/gpfs/home4/skleynhans/report/iedb_data/swissprot/uniprot_sprot.fasta"
+SWISSPROT_FASTA  <- "/gpfs/home4/skleynhans/report/iedb_data/swissprot/human_swissprot_reviewed.fasta"
 
 OUT_DIR          <- "/gpfs/home4/skleynhans/report/iedb_data/swissprot/"
 
